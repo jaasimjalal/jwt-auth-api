@@ -2,10 +2,9 @@ pipeline {
     agent any
 
     environment {
-        DOCKER_IMAGE_NAME = "jwt-auth-api"
-        DOCKER_TAG = "latest"
+        IMAGE_NAME = "jwt-auth-api"
         CONTAINER_NAME = "jwt-auth-api-container"
-        PORT = "3000"
+        REGISTRY_URL = "http://10.244.9.19:5000"
     }
 
     stages {
@@ -15,63 +14,53 @@ pipeline {
             }
         }
 
-        stage('Build') {
+        stage('Build Docker Image') {
             steps {
                 script {
-                    echo 'Building Docker image...'
-                    sh "docker build -t ${DOCKER_IMAGE_NAME}:${DOCKER_TAG} ."
+                    echo "Building Docker image: ${IMAGE_NAME}"
+                    sh "docker build -t ${IMAGE_NAME} ."
                 }
             }
         }
 
-        stage('Test') {
+        stage('Stop & Remove Existing Container') {
             steps {
                 script {
-                    echo 'Running tests...'
-                    sh 'npm install || true'
-                    sh 'npm test || true'
+                    echo "Cleaning up existing containers..."
+                    sh "docker rm -f ${CONTAINER_NAME} || true"
                 }
             }
         }
 
-        stage('Deploy') {
+        stage('Run Container Locally') {
             steps {
                 script {
-                    echo 'Deploying container...'
-                    
-                    # Stop and remove existing container if it exists
-                    sh "docker stop ${CONTAINER_NAME} || true"
-                    sh "docker rm ${CONTAINER_NAME} || true"
-                    
-                    # Remove dangling images to save space
-                    sh 'docker image prune -f || true'
-                    
-                    # Run new container
-                    sh "docker run -d --name ${CONTAINER_NAME} -p ${PORT}:3000 --env-file .env ${DOCKER_IMAGE_NAME}:${DOCKER_TAG}"
-                    
-                    echo "Service running on http://localhost:${PORT}"
+                    echo "Starting container: ${CONTAINER_NAME}"
+                    sh "docker run -d --name ${CONTAINER_NAME} -p 3000:3000 ${IMAGE_NAME}"
                 }
             }
         }
 
-        stage('Verify') {
+        stage('Health Check') {
             steps {
                 script {
-                    echo 'Verifying service deployment...'
-                    
-                    # Wait for container to start
-                    sh 'sleep 5'
-                    
-                    # Check health endpoint
-                    sh 'curl -s -f http://localhost:${PORT}/health || echo "Health check failed but continuing..."'
-                    
-                    # Check auth endpoint with test credentials
-                    sh '''
-                    curl -s -X POST http://localhost:${PORT}/api/v1/auth/login \
-                        -H "Content-Type: application/json" \
-                        -d '{"username":"testuser","password":"testpass123"}' \
-                        -w "\nHTTP Status: %{http_code}\n" || echo "Auth endpoint check failed"
-                    '''
+                    timeout(time: 30, unit: 'SECONDS') {
+                        waitUntil {
+                            script {
+                                try {
+                                    def status = sh(
+                                        script: "curl -s -o /dev/null -w \"%{http_code}\" http://localhost:3000/health",
+                                        returnStdout: true
+                                    ).trim()
+                                    echo "Health check response code: ${status}"
+                                    return status == '200'
+                                } catch (Exception e) {
+                                    echo "Health check failed: ${e.message}"
+                                    return false
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -80,19 +69,16 @@ pipeline {
     post {
         always {
             script {
-                echo 'Cleaning up...'
+                echo "Cleaning up..."
+                sh "docker stop ${CONTAINER_NAME} || true"
+                sh "docker rm ${CONTAINER_NAME} || true"
             }
         }
         success {
-            script {
-                echo 'Deployment successful!'
-                echo "Service is running on http://localhost:${PORT}"
-            }
+            echo "Deployment successful!"
         }
         failure {
-            script {
-                echo 'Deployment failed!'
-            }
+            echo "Pipeline failed!"
         }
     }
 }
